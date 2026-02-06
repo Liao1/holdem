@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+@theme {
+  --color-felt-green: #1a6b3c;
+  --color-felt-dark: #145530;
+  --color-felt-border: #0f3d22;
+  --color-card-red: #dc2626;
+  --color-card-black: #1a1a2e;
+  --color-gold: #f5c542;
+  --color-chip-blue: #3b82f6;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: #0a0a1a;
+  color: white;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Scrollbar styling for game log */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.2);
+  border-radius: 2px;
+}

@@ -1,0 +1,150 @@
+/* Poker card styles */
+.poker-card {
+  width: 60px;
+  height: 84px;
+  border-radius: 6px;
+  position: relative;
+  perspective: 600px;
+  font-family: 'Georgia', serif;
+}
+
+.poker-card-inner {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.4s ease;
+}
+
+.poker-card-inner.flipped {
+  transform: rotateY(180deg);
+}
+
+.poker-card-front,
+.poker-card-back {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  backface-visibility: hidden;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+/* Front face */
+.poker-card-front {
+  background: white;
+  transform: rotateY(180deg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.card-corner {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1;
+}
+
+.card-corner-top {
+  top: 3px;
+  left: 4px;
+}
+
+.card-corner-bottom {
+  bottom: 3px;
+  right: 4px;
+  transform: rotate(180deg);
+}
+
+.card-rank {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.card-suit-small {
+  font-size: 11px;
+  margin-top: -2px;
+}
+
+.card-suit-center {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.card-red {
+  color: #dc2626;
+}
+
+.card-black {
+  color: #1a1a2e;
+}
+
+/* Back face */
+.poker-card-back {
+  background: linear-gradient(135deg, #991b1b, #7f1d1d);
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.poker-card-back::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  right: 4px;
+  bottom: 4px;
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 5px,
+    rgba(255, 255, 255, 0.05) 5px,
+    rgba(255, 255, 255, 0.05) 10px
+  );
+}
+
+.poker-card-back::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 20px;
+  height: 20px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Small card variant */
+.poker-card-sm {
+  width: 44px;
+  height: 62px;
+}
+
+.poker-card-sm .card-rank {
+  font-size: 11px;
+}
+
+.poker-card-sm .card-suit-small {
+  font-size: 9px;
+}
+
+.poker-card-sm .card-suit-center {
+  font-size: 20px;
+}
+
+.poker-card-sm .card-corner-top {
+  top: 2px;
+  left: 3px;
+}
+
+.poker-card-sm .card-corner-bottom {
+  bottom: 2px;
+  right: 3px;
+}

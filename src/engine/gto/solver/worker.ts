@@ -1,4 +1,5 @@
 import * as Comlink from 'comlink';
+import init, { GameManager } from '../../../../pkg/solver-st/solver.js';
 
 /**
  * Solver Worker — runs WASM CFR solver off the main thread.
@@ -7,21 +8,17 @@ import * as Comlink from 'comlink';
  * methods for initialisation, solving, and strategy retrieval via Comlink.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let solverModule: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let manager: any = null;
+let wasmReady = false;
+let manager: GameManager | null = null;
 
 const solverAPI = {
   /**
    * Load the WASM module. Call once before anything else.
    */
   async loadWasm(): Promise<void> {
-    if (solverModule) return;
-    // @ts-ignore: runtime dynamic import from Vite public directory
-    const mod = await import(/* @vite-ignore */ '/pkg/solver-st/solver.js');
-    await mod.default({ module_or_path: '/wasm/solver_bg.wasm' });
-    solverModule = mod;
+    if (wasmReady) return;
+    await init();
+    wasmReady = true;
   },
 
   /**
@@ -35,11 +32,26 @@ const solverAPI = {
     startingPot: number,
     effectiveStack: number,
   ): string | null {
-    // GameManager.new() is a static factory method
-    manager = solverModule.GameManager.new();
+    // Validate inputs
+    if (board.length < 3 || board.length > 5) {
+      return `Invalid board length: ${board.length}`;
+    }
+    if (startingPot <= 0 || effectiveStack <= 0) {
+      return `Invalid pot/stack: pot=${startingPot}, stack=${effectiveStack}`;
+    }
 
-    // Simplified bet sizing configuration
-    const oopFlopBet = '33%,75%';
+    const oopHasWeight = oopRange.some(w => w > 0);
+    const ipHasWeight = ipRange.some(w => w > 0);
+    if (!oopHasWeight || !ipHasWeight) {
+      return 'Empty range detected';
+    }
+
+    // GameManager.new() is a static factory method
+    manager = GameManager.new();
+
+    // Bet sizing: use fewer sizes on the flop (3-street tree) to keep memory manageable
+    const isFlop = board.length === 3;
+    const oopFlopBet = isFlop ? '33%' : '33%,75%';
     const oopFlopRaise = '2.5x';
     const oopTurnBet = '50%,75%';
     const oopTurnRaise = '2.5x';
@@ -47,7 +59,7 @@ const solverAPI = {
     const oopRiverBet = '66%,100%';
     const oopRiverRaise = '2.5x';
     const oopRiverDonk = '';
-    const ipFlopBet = '33%,75%';
+    const ipFlopBet = isFlop ? '33%' : '33%,75%';
     const ipFlopRaise = '2.5x';
     const ipTurnBet = '50%,75%';
     const ipTurnRaise = '2.5x';
@@ -79,7 +91,7 @@ const solverAPI = {
       ipRiverRaise,
       0.67,       // addAllInThreshold
       0.15,       // forceAllInThreshold
-      0.1,        // mergingThreshold
+      0.2,        // mergingThreshold (higher = more merging = smaller tree)
       '',         // addedLines
       '',         // removedLines
     );
@@ -91,8 +103,14 @@ const solverAPI = {
       return error;
     }
 
-    // Allocate memory (no compression for speed)
-    manager.allocate_memory(false);
+    // Allocate memory
+    try {
+      manager.allocate_memory(false);
+    } catch (e) {
+      manager.free();
+      manager = null;
+      return `Memory allocation failed: ${e}`;
+    }
     return null;
   },
 
@@ -203,7 +221,7 @@ const solverAPI = {
       manager.free();
       manager = null;
     }
-    solverModule = null;
+    wasmReady = false;
   },
 };
 

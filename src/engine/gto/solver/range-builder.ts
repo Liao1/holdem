@@ -125,15 +125,15 @@ function rangeToFloat32(
   return arr;
 }
 
-/**
- * Identify the preflop raiser from the action log.
- * Returns { raiserId, raiserPosition, wasReRaised }
- */
-function identifyPreflopRaiser(gameState: GameState): {
+// ── Preflop raiser identification ────────────────────────────
+
+interface RaiserInfo {
   raiserId: string;
   raiserPosition: Position;
   wasReRaised: boolean;
-} | null {
+}
+
+function identifyPreflopRaiser(gameState: GameState): RaiserInfo | null {
   const preflopActions = gameState.actionLog.filter(
     e => e.phase === GamePhase.PRE_FLOP && e.handNumber === gameState.handNumber,
   );
@@ -155,81 +155,106 @@ function identifyPreflopRaiser(gameState: GameState): {
   };
 }
 
+// ── Per-player range building ────────────────────────────────
+
+/**
+ * Build a single player's estimated range as a 1326-element Float32Array.
+ */
+function buildPlayerRange(
+  gameState: GameState,
+  playerId: string,
+  raiserInfo: RaiserInfo | null,
+  blockedIds: Set<number>,
+): Float32Array {
+  const player = gameState.players.find(p => p.id === playerId);
+  if (!player) return defaultRange(blockedIds);
+
+  const pos = getPlayerPosition(player, gameState);
+
+  if (!raiserInfo) {
+    // Limped pot: wide range
+    const wideRange = getRFIRange(Position.BTN);
+    return rangeToFloat32(wideRange, 'call', blockedIds);
+  }
+
+  const isRaiser = raiserInfo.raiserId === playerId;
+
+  if (raiserInfo.wasReRaised) {
+    // 3-bet pot
+    const range = getFacing3BetRange();
+    return rangeToFloat32(range, isRaiser ? 'raise' : 'call', blockedIds);
+  }
+
+  // Single raised pot
+  if (isRaiser) {
+    return rangeToFloat32(getRFIRange(pos), 'raise', blockedIds);
+  }
+
+  // Caller
+  return rangeToFloat32(getBBDefenseRange(raiserInfo.raiserPosition), 'call', blockedIds);
+}
+
+// ── Range merging for multiway ───────────────────────────────
+
+/**
+ * Merge multiple opponent ranges into one by taking the max weight per combo.
+ * This represents "any opponent could hold this combo".
+ */
+function mergeRanges(ranges: Float32Array[]): Float32Array {
+  if (ranges.length === 0) return new Float32Array(1326);
+  if (ranges.length === 1) return ranges[0];
+
+  const merged = new Float32Array(1326);
+  for (let i = 0; i < 1326; i++) {
+    let max = 0;
+    for (const range of ranges) {
+      if (range[i] > max) max = range[i];
+    }
+    merged[i] = max;
+  }
+  return merged;
+}
+
+// ── Public API ───────────────────────────────────────────────
+
 export interface RangeResult {
   oopRange: Float32Array;
   ipRange: Float32Array;
 }
 
 /**
- * Build OOP and IP ranges from the preflop action history.
+ * Build OOP and IP ranges for the solver.
  *
- * The solver requires 1326-element Float32Array for each player.
- * We infer ranges from preflop action patterns:
- *   - Raiser gets their RFI/3-bet range (raise weights)
- *   - Caller gets defense range (call weights)
+ * Supports both heads-up and multiway pots. For multiway, all opponent
+ * ranges are merged into one "virtual opponent" range (max per combo).
+ *
+ * @param gameState      Current game state
+ * @param botPlayerId    The bot player's ID
+ * @param opponentIds    IDs of all active opponents
+ * @param botIsIP        Whether the bot acts last (is in position)
  */
 export function buildRanges(
   gameState: GameState,
-  oopPlayer: string,
-  ipPlayer: string,
+  botPlayerId: string,
+  opponentIds: string[],
+  botIsIP: boolean,
 ): RangeResult {
-  const board = gameState.communityCards;
-  const blockedIds = new Set(board.map(c => cardToSolverId(c)));
-
+  const blockedIds = new Set(gameState.communityCards.map(c => cardToSolverId(c)));
   const raiserInfo = identifyPreflopRaiser(gameState);
 
-  const oopPlayerObj = gameState.players.find(p => p.id === oopPlayer);
-  const ipPlayerObj = gameState.players.find(p => p.id === ipPlayer);
+  // Build bot's range
+  const botRange = buildPlayerRange(gameState, botPlayerId, raiserInfo, blockedIds);
 
-  if (!oopPlayerObj || !ipPlayerObj) {
-    return { oopRange: defaultRange(blockedIds), ipRange: defaultRange(blockedIds) };
-  }
+  // Build each opponent's range, then merge
+  const opponentRanges = opponentIds.map(id =>
+    buildPlayerRange(gameState, id, raiserInfo, blockedIds),
+  );
+  const mergedOpponentRange = mergeRanges(opponentRanges);
 
-  const oopPos = getPlayerPosition(oopPlayerObj, gameState);
-  const ipPos = getPlayerPosition(ipPlayerObj, gameState);
-
-  if (!raiserInfo) {
-    // Limped pot: both have wide ranges
-    const wideRange = getRFIRange(Position.BTN); // widest RFI as proxy
-    return {
-      oopRange: rangeToFloat32(wideRange, 'call', blockedIds),
-      ipRange: rangeToFloat32(wideRange, 'call', blockedIds),
-    };
-  }
-
-  const isOopRaiser = raiserInfo.raiserId === oopPlayer;
-
-  let raiserRange: Range;
-  let callerRange: Range;
-
-  if (raiserInfo.wasReRaised) {
-    // 3-bet pot: raiser has 3-bet range, caller has continue vs 3-bet range
-    raiserRange = getFacing3BetRange();
-    callerRange = getFacing3BetRange();
-  } else {
-    // Single raised pot
-    const raiserPos = isOopRaiser ? oopPos : ipPos;
-    const callerPos = isOopRaiser ? ipPos : oopPos;
-    raiserRange = getRFIRange(raiserPos);
-
-    if (callerPos === Position.BB) {
-      callerRange = getBBDefenseRange(raiserPos);
-    } else {
-      callerRange = getBBDefenseRange(raiserPos); // approximate
-    }
-  }
-
-  if (isOopRaiser) {
-    return {
-      oopRange: rangeToFloat32(raiserRange, 'raise', blockedIds),
-      ipRange: rangeToFloat32(callerRange, 'call', blockedIds),
-    };
-  } else {
-    return {
-      oopRange: rangeToFloat32(callerRange, 'call', blockedIds),
-      ipRange: rangeToFloat32(raiserRange, 'raise', blockedIds),
-    };
-  }
+  return {
+    oopRange: botIsIP ? mergedOpponentRange : botRange,
+    ipRange: botIsIP ? botRange : mergedOpponentRange,
+  };
 }
 
 /**

@@ -1,0 +1,19 @@
+{
+  "name": "solver",
+  "type": "module",
+  "collaborators": [
+    "Wataru Inariba"
+  ],
+  "version": "0.2.7",
+  "license": "AGPL-3.0-or-later",
+  "files": [
+    "solver_bg.wasm",
+    "solver.js",
+    "solver.d.ts"
+  ],
+  "main": "solver.js",
+  "types": "solver.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

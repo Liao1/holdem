@@ -40,7 +40,7 @@ export function useGameEngine() {
       });
     } else {
       // Bot action
-      return getBotAction(playerId, legalActions);
+      return getBotAction(playerId, legalActions, gs);
     }
   }, [dispatch]);
 

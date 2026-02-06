@@ -15,7 +15,12 @@
       "Bash(npx tsc:*)",
       "mcp__plugin_frontend-testing_playwright__browser_close",
       "WebSearch",
-      "WebFetch(domain:en.wikipedia.org)"
+      "WebFetch(domain:en.wikipedia.org)",
+      "Bash(npx vite build:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(find:*)",
+      "Bash(cargo install:*)",
+      "Bash(npm run build:*)"
     ]
   }
 }

@@ -4,8 +4,14 @@ import { BIG_BLIND } from '../constants';
 import { isInPosition } from './position';
 import { solve } from './solver/solver-bridge';
 import type { SolverAction } from './solver/solver-bridge';
-import { boardToSolverIds, findHandInPrivateCards } from './solver/card-adapter';
+import { boardToSolverIds, findHandInPrivateCards, solverIdToCard } from './solver/card-adapter';
 import { buildRanges } from './solver/range-builder';
+
+const RANK_CHARS = '  23456789TJQKA';
+const SUIT_CHARS: Record<string, string> = { clubs: 'c', diamonds: 'd', hearts: 'h', spades: 's' };
+function cardStr(c: { rank: number; suit: string }): string {
+  return (RANK_CHARS[c.rank] || '?') + (SUIT_CHARS[c.suit] || '?');
+}
 
 /**
  * Make a postflop decision using the WASM CFR solver.
@@ -48,6 +54,18 @@ async function trySolverAction(
 
     const ip = isInPosition(player, gameState);
 
+    const holeStr = player.holeCards.map(c => cardStr(c)).join('');
+    const boardStr = gameState.communityCards.map(c => cardStr(c)).join(' ');
+    console.log('[PostflopEngine] === Decision Start ===');
+    console.log('[PostflopEngine] player:', player.id, 'hand:', holeStr, 'board:', boardStr);
+    console.log('[PostflopEngine] position:', ip ? 'IP' : 'OOP', 'opponents:', opponentIds.length);
+    console.log('[PostflopEngine] legalActions:', legalActions.map(a => {
+      let s = a.type as string;
+      if (a.callAmount) s += `(call=${a.callAmount})`;
+      if (a.minAmount != null) s += `(min=${a.minAmount},max=${a.maxAmount})`;
+      return s;
+    }).join(', '));
+
     // Build ranges (multiway: opponents merged into virtual opponent)
     const { oopRange, ipRange } = buildRanges(gameState, player.id, opponentIds, ip);
 
@@ -66,19 +84,41 @@ async function trySolverAction(
     );
     let effectiveStack = Math.min(player.chips, maxOpponentChips);
 
-    // Cap SPR to prevent excessively large game trees that exceed WASM memory
-    const MAX_SPR = 12;
+    // Cap SPR based on remaining streets to keep game tree manageable
+    // Flop (3 streets) = smallest cap, River (1 street) = largest cap
+    const numBoardCards = gameState.communityCards.length;
+    const MAX_SPR = numBoardCards === 3 ? 4 : numBoardCards === 4 ? 8 : 15;
     if (effectiveStack > startingPot * MAX_SPR) {
-      effectiveStack = Math.floor(startingPot * MAX_SPR);
+      const capped = Math.floor(startingPot * MAX_SPR);
+      console.log('[PostflopEngine] SPR cap: stack', effectiveStack, '→', capped, '(pot:', startingPot, 'streets:', 6 - numBoardCards, ')');
+      effectiveStack = capped;
     }
+    console.log('[PostflopEngine] pot:', startingPot, 'effectiveStack:', effectiveStack, 'SPR:', (effectiveStack / startingPot).toFixed(1));
 
     // Solve
     const result = await solve(oopRange, ipRange, board, startingPot, effectiveStack);
-    if (!result) return null;
+    if (!result) {
+      console.warn('[PostflopEngine] Solver returned null');
+      return null;
+    }
+
+    console.log('[PostflopEngine] === Solver Output ===');
+    console.log('[PostflopEngine] iterations:', result.iterations, 'exploitability:', result.exploitability.toFixed(2));
+    console.log('[PostflopEngine] currentPlayer:', result.currentPlayer);
+    console.log('[PostflopEngine] actions:', result.actions.map(a => `${a.type}:${a.amount}`).join(' / '));
+    console.log('[PostflopEngine] numHands (private combos):', result.numHands);
 
     // Find the bot's hand in the solver's private cards
     const handIdx = findHandInPrivateCards(player.holeCards, result.privateCards);
-    if (handIdx < 0) return null;
+    if (handIdx < 0) {
+      console.warn('[PostflopEngine] Hand', holeStr, 'not found in privateCards');
+      return null;
+    }
+    // Decode the matched combo for verification
+    const packed = result.privateCards[handIdx];
+    const matchedC1 = solverIdToCard(packed & 0xff);
+    const matchedC2 = solverIdToCard((packed >> 8) & 0xff);
+    console.log('[PostflopEngine] hand matched at index', handIdx, '→', cardStr(matchedC1) + cardStr(matchedC2));
 
     // Read the strategy for this hand
     const numActions = result.actions.length;
@@ -87,12 +127,24 @@ async function trySolverAction(
       handStrategy.push(result.strategy[a * result.numHands + handIdx]);
     }
 
+    // Log the strategy for this specific hand
+    console.log('[PostflopEngine] === Hand Strategy ===');
+    for (let a = 0; a < numActions; a++) {
+      const action = result.actions[a];
+      const prob = handStrategy[a];
+      console.log(`[PostflopEngine]   ${action.type}:${action.amount} → ${(prob * 100).toFixed(1)}%`);
+    }
+
     // Sample an action according to the strategy probabilities
     const chosenIdx = sampleAction(handStrategy);
     const chosenSolverAction = result.actions[chosenIdx];
+    console.log('[PostflopEngine] === Sampled Action ===');
+    console.log('[PostflopEngine] chosen:', chosenSolverAction.type, 'amount:', chosenSolverAction.amount);
 
     // Map solver action → game action
-    return mapSolverAction(chosenSolverAction, player, legalActions);
+    const finalAction = mapSolverAction(chosenSolverAction, player, legalActions);
+    console.log('[PostflopEngine] → final game action:', finalAction.type, 'amount:', finalAction.amount);
+    return finalAction;
   } catch (e) {
     console.warn('[PostflopEngine] Solver failed:', e);
     return null;

@@ -84,6 +84,16 @@ export async function solve(
   if (!ready || !proxy) return null;
 
   try {
+    // Log inputs
+    const oopNonZero = oopRange.reduce((n, w) => n + (w > 0 ? 1 : 0), 0);
+    const ipNonZero = ipRange.reduce((n, w) => n + (w > 0 ? 1 : 0), 0);
+    console.log('[SolverBridge] === WASM Input ===');
+    console.log('[SolverBridge] board:', Array.from(board));
+    console.log('[SolverBridge] startingPot:', startingPot, 'effectiveStack:', effectiveStack);
+    console.log('[SolverBridge] oopRange non-zero combos:', oopNonZero, '/ 1326');
+    console.log('[SolverBridge] ipRange non-zero combos:', ipNonZero, '/ 1326');
+    console.log('[SolverBridge] history:', history);
+
     // Initialize the game tree
     const initError = await proxy.init(
       Comlink.transfer(oopRange, [oopRange.buffer]),
@@ -98,16 +108,33 @@ export async function solve(
       return null;
     }
 
-    // Solve: 200 iterations max, target 0.5% of pot exploitability
-    const targetExploitability = startingPot * 0.005;
-    const solveResult = await proxy.solve(200, targetExploitability);
+    // Fewer iterations for larger trees (flop=3 streets vs river=1 street)
+    const streetsLeft = 6 - board.length;
+    const maxIterations = streetsLeft >= 3 ? 50 : streetsLeft === 2 ? 100 : 200;
+    const targetExploitability = startingPot * 0.01;
+    console.log('[SolverBridge] solving: maxIter=%d, targetExpl=%.2f, streets=%d', maxIterations, targetExploitability, streetsLeft);
+    const solveStart = performance.now();
+    const solveResult = await proxy.solve(maxIterations, targetExploitability);
+    const solveMs = performance.now() - solveStart;
+    console.log('[SolverBridge] === WASM Solve Result ===');
+    console.log('[SolverBridge] iterations:', solveResult.iterations, 'exploitability:', solveResult.exploitability, 'time:', solveMs.toFixed(0) + 'ms');
 
     // Get strategy at the given history position
     const strategyResult = await proxy.getStrategy(history);
-    if (!strategyResult) return null;
+    if (!strategyResult) {
+      console.warn('[SolverBridge] getStrategy returned null (terminal/chance node)');
+      return null;
+    }
+
+    console.log('[SolverBridge] === WASM Strategy Result ===');
+    console.log('[SolverBridge] currentPlayer:', strategyResult.currentPlayer);
+    console.log('[SolverBridge] actions:', strategyResult.actions);
+    console.log('[SolverBridge] numHands:', strategyResult.numHands);
+    console.log('[SolverBridge] strategy length:', strategyResult.strategy.length);
 
     const playerIdx = strategyResult.currentPlayer === 'oop' ? 0 : 1;
     const privateCards = await proxy.getPrivateCards(playerIdx);
+    console.log('[SolverBridge] privateCards count:', privateCards.length);
 
     return {
       actions: parseActions(strategyResult.actions),

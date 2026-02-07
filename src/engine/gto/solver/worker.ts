@@ -46,25 +46,51 @@ const solverAPI = {
       return 'Empty range detected';
     }
 
+    // Free previous manager before creating a new one
+    if (manager) {
+      try { manager.free(); } catch { /* ignore */ }
+      manager = null;
+    }
+
     // GameManager.new() is a static factory method
     manager = GameManager.new();
 
-    // Bet sizing: use fewer sizes on the flop (3-street tree) to keep memory manageable
-    const isFlop = board.length === 3;
-    const oopFlopBet = isFlop ? '33%' : '33%,75%';
-    const oopFlopRaise = '2.5x';
-    const oopTurnBet = '50%,75%';
-    const oopTurnRaise = '2.5x';
+    // Bet sizing varies by number of remaining streets to keep tree size manageable:
+    //   Flop (3 streets): 1 bet size per street, minimal raise
+    //   Turn (2 streets): 2 bet sizes on river, 1 on turn
+    //   River (1 street): 2 bet sizes
+    const streetsLeft = 6 - board.length; // 3=flop, 2=turn, 1=river
+    let oopFlopBet: string, ipFlopBet: string, oopFlopRaise: string, ipFlopRaise: string;
+    let oopTurnBet: string, ipTurnBet: string, oopTurnRaise: string, ipTurnRaise: string;
+    let oopRiverBet: string, ipRiverBet: string, oopRiverRaise: string, ipRiverRaise: string;
+
+    if (streetsLeft >= 3) {
+      // Flop: very simple tree — 1 size per street
+      oopFlopBet = '33%';   ipFlopBet = '33%';
+      oopFlopRaise = '2x';  ipFlopRaise = '2x';
+      oopTurnBet = '66%';   ipTurnBet = '66%';
+      oopTurnRaise = '2x';  ipTurnRaise = '2x';
+      oopRiverBet = '75%';  ipRiverBet = '75%';
+      oopRiverRaise = '2x'; ipRiverRaise = '2x';
+    } else if (streetsLeft === 2) {
+      // Turn: medium complexity
+      oopFlopBet = '33%,75%'; ipFlopBet = '33%,75%';
+      oopFlopRaise = '2.5x';  ipFlopRaise = '2.5x';
+      oopTurnBet = '50%,75%'; ipTurnBet = '50%,75%';
+      oopTurnRaise = '2.5x';  ipTurnRaise = '2.5x';
+      oopRiverBet = '66%,100%'; ipRiverBet = '66%,100%';
+      oopRiverRaise = '2.5x';   ipRiverRaise = '2.5x';
+    } else {
+      // River: full complexity
+      oopFlopBet = '33%,75%'; ipFlopBet = '33%,75%';
+      oopFlopRaise = '2.5x';  ipFlopRaise = '2.5x';
+      oopTurnBet = '50%,75%'; ipTurnBet = '50%,75%';
+      oopTurnRaise = '2.5x';  ipTurnRaise = '2.5x';
+      oopRiverBet = '66%,100%'; ipRiverBet = '66%,100%';
+      oopRiverRaise = '2.5x';   ipRiverRaise = '2.5x';
+    }
     const oopTurnDonk = '';
-    const oopRiverBet = '66%,100%';
-    const oopRiverRaise = '2.5x';
     const oopRiverDonk = '';
-    const ipFlopBet = isFlop ? '33%' : '33%,75%';
-    const ipFlopRaise = '2.5x';
-    const ipTurnBet = '50%,75%';
-    const ipTurnRaise = '2.5x';
-    const ipRiverBet = '66%,100%';
-    const ipRiverRaise = '2.5x';
 
     const error = manager.init(
       oopRange,
@@ -98,7 +124,8 @@ const solverAPI = {
 
     // init returns string on error, undefined on success
     if (error !== undefined) {
-      manager.free();
+      // Don't call free() here — partially initialized GameManager
+      // may trigger Rust ownership errors on free
       manager = null;
       return error;
     }
@@ -107,7 +134,7 @@ const solverAPI = {
     try {
       manager.allocate_memory(false);
     } catch (e) {
-      manager.free();
+      // Same: don't free a failed-allocation manager
       manager = null;
       return `Memory allocation failed: ${e}`;
     }

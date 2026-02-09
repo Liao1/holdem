@@ -56,6 +56,10 @@ export function useGameEngine() {
     engine.startGame();
   }, [onStateChange, onActionRequest, onAnimation]);
 
+  const proceedToNextHand = useCallback(() => {
+    engineRef.current?.proceedToNextHand();
+  }, []);
+
   const submitHumanAction = useCallback((type: ActionType, amount: number) => {
     if (humanResolverRef.current) {
       const resolver = humanResolverRef.current;
@@ -85,5 +89,6 @@ export function useGameEngine() {
     isAnimating: state.isAnimating,
     startGame,
     submitHumanAction,
+    proceedToNextHand,
   };
 }

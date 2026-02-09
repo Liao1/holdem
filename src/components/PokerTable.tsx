@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import type { GameState } from '../engine/types';
 import { GamePhase, ActionType } from '../engine/types';
 import PlayerSeat from './PlayerSeat';
@@ -11,9 +12,10 @@ import { getSeatPosition } from '../utils/seatLayout';
 interface PokerTableProps {
   gameState: GameState;
   onAction: (type: ActionType, amount: number) => void;
+  onNextHand: () => void;
 }
 
-export default function PokerTable({ gameState, onAction }: PokerTableProps) {
+export default function PokerTable({ gameState, onAction, onNextHand }: PokerTableProps) {
   const {
     players, communityCards, pots, phase,
     dealerIndex, smallBlindIndex, bigBlindIndex,
@@ -24,6 +26,13 @@ export default function PokerTable({ gameState, onAction }: PokerTableProps) {
   const totalPlayers = players.length;
   const isShowdown = phase === GamePhase.SHOWDOWN;
   const isGameOver = phase === GamePhase.GAME_OVER;
+  const handComplete = isShowdown && winners && winners.length > 0;
+
+  const [showAllCards, setShowAllCards] = useState(false);
+
+  useEffect(() => {
+    if (!winners) setShowAllCards(false);
+  }, [winners]);
 
   const currentPot = pots.reduce((sum, p) => sum + p.amount, 0);
 
@@ -60,6 +69,7 @@ export default function PokerTable({ gameState, onAction }: PokerTableProps) {
               isSB={player.seatIndex === smallBlindIndex}
               isBB={player.seatIndex === bigBlindIndex}
               showCards={player.isHuman || isShowdown}
+              revealAll={showAllCards}
               style={position}
             />
           );
@@ -68,6 +78,29 @@ export default function PokerTable({ gameState, onAction }: PokerTableProps) {
         {/* Hand result overlay */}
         {winners && winners.length > 0 && (
           <HandResult winners={winners} />
+        )}
+
+        {/* End-of-hand buttons */}
+        {handComplete && (
+          <div className="absolute left-1/2 -translate-x-1/2 flex gap-3 z-50" style={{ top: '68%' }}>
+            <button
+              onClick={() => setShowAllCards(true)}
+              disabled={showAllCards}
+              className={`px-5 py-2 rounded-lg font-bold text-sm transition-colors
+                ${showAllCards
+                  ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                  : 'bg-blue-600 hover:bg-blue-500 text-white'
+                }`}
+            >
+              看牌
+            </button>
+            <button
+              onClick={onNextHand}
+              className="px-5 py-2 bg-yellow-600 hover:bg-yellow-500 text-black font-bold text-sm rounded-lg transition-colors"
+            >
+              下一局
+            </button>
+          </div>
         )}
 
         {/* Hand number */}

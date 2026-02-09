@@ -9,11 +9,12 @@ interface PlayerSeatProps {
   isSB: boolean;
   isBB: boolean;
   showCards: boolean;
+  revealAll?: boolean;
   style: { top: string; left: string };
 }
 
 export default function PlayerSeat({
-  player, isActive, isDealer, isSB, isBB, showCards, style,
+  player, isActive, isDealer, isSB, isBB, showCards, revealAll, style,
 }: PlayerSeatProps) {
   if (player.status === 'BUSTED') return null;
 
@@ -44,20 +45,20 @@ export default function PlayerSeat({
       </div>
 
       {/* Hole cards */}
-      <div className="flex gap-0.5 mb-1 h-[62px]">
+      <div className="flex gap-0.5 mb-1 h-[93px]">
         {player.holeCards.length > 0 ? (
           player.holeCards.map((card, i) => (
             <Card
               key={i}
               card={card}
-              faceUp={showCards && !isFolded}
+              faceUp={(showCards && !isFolded) || !!revealAll}
               dealing
               delay={i * 0.1}
               small
             />
           ))
         ) : (
-          <div className="w-[92px] h-[62px]" />
+          <div className="w-[138px] h-[93px]" />
         )}
       </div>
 

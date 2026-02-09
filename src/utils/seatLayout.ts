@@ -15,7 +15,7 @@ export function getSeatPosition(
   // Distribute other players clockwise around ellipse
   // Starting from bottom-left going clockwise
   const otherCount = totalPlayers - 1;
-  const position = seatIndex - 1; // 0-indexed position among non-human players
+  const position = otherCount - seatIndex; // 0-indexed position among non-human players (reversed for clockwise)
 
   // Angle range: from ~210° (bottom-left) clockwise through top to ~330° (bottom-right)
   // We go from 210° counterclockwise in layout (which is clockwise visually)

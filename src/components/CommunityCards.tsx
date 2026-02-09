@@ -14,7 +14,7 @@ export default function CommunityCards({ cards }: CommunityCardsProps) {
           return (
             <div
               key={i}
-              className="w-[60px] h-[84px] rounded-md border border-white/10 bg-white/5"
+              className="w-[90px] h-[126px] rounded-md border border-white/10 bg-white/5"
             />
           );
         }

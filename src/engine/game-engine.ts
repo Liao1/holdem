@@ -16,6 +16,7 @@ export class GameEngine {
   private onActionRequest: OnActionRequest;
   private onAnimation: OnAnimation;
   private running = false;
+  private nextHandResolver: (() => void) | null = null;
 
   constructor(
     playerCount: number,
@@ -488,7 +489,7 @@ export class GameEngine {
     this.state.phase = GamePhase.SHOWDOWN;
     this.emitState();
     await this.onAnimation({ type: 'AWARD_POT', winnerId: winner.id, amount: totalPot });
-    await this.sleep(2000);
+    await this.waitForNextHand();
   }
 
   private async showdown(): Promise<void> {
@@ -525,7 +526,7 @@ export class GameEngine {
     this.state.winners = winners;
     this.emitState();
 
-    await this.sleep(3000);
+    await this.waitForNextHand();
   }
 
   private async cleanup(): Promise<void> {
@@ -637,6 +638,20 @@ export class GameEngine {
 
   private emitState(): void {
     this.onStateChange({ ...this.state });
+  }
+
+  private waitForNextHand(): Promise<void> {
+    return new Promise(resolve => {
+      this.nextHandResolver = resolve;
+    });
+  }
+
+  proceedToNextHand(): void {
+    if (this.nextHandResolver) {
+      const resolver = this.nextHandResolver;
+      this.nextHandResolver = null;
+      resolver();
+    }
   }
 
   private sleep(ms: number): Promise<void> {

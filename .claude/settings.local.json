@@ -22,7 +22,8 @@
       "Bash(cargo install:*)",
       "Bash(npm run build:*)",
       "Bash(cargo +nightly clean:*)",
-      "Bash(rustup run nightly wasm-pack build:*)"
+      "Bash(rustup run nightly wasm-pack build:*)",
+      "Bash(grep:*)"
     ]
   }
 }

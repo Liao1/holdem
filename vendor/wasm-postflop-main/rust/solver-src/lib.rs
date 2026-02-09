@@ -1,6 +1,14 @@
+#![cfg_attr(feature = "rayon", feature(thread_local))]
+
 extern crate wasm_bindgen;
 use postflop_solver::*;
 use wasm_bindgen::prelude::*;
+
+// Force lld to generate __wasm_init_tls and related TLS symbols,
+// required by wasm-bindgen's thread transform for shared memory.
+#[cfg(feature = "rayon")]
+#[thread_local]
+static _TLS_GUARD: u32 = 0;
 
 #[cfg(not(feature = "rayon"))]
 struct DummyPool;

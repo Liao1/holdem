@@ -110,8 +110,8 @@ export async function solve(
 
     // Fewer iterations for larger trees (flop=3 streets vs river=1 street)
     const streetsLeft = 6 - board.length;
-    const maxIterations = streetsLeft >= 3 ? 50 : streetsLeft === 2 ? 100 : 200;
-    const targetExploitability = startingPot * 0.01;
+    const maxIterations = streetsLeft >= 3 ? 40 : streetsLeft === 2 ? 80 : 200;
+    const targetExploitability = startingPot * 0.02;
     console.log('[SolverBridge] solving: maxIter=%d, targetExpl=%.2f, streets=%d', maxIterations, targetExploitability, streetsLeft);
     const solveStart = performance.now();
     const solveResult = await proxy.solve(maxIterations, targetExploitability);

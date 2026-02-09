@@ -1,15 +1,53 @@
 import * as Comlink from 'comlink';
-import init, { GameManager } from '../../../../pkg/solver-st/solver.js';
 
 /**
  * Solver Worker — runs WASM CFR solver off the main thread.
  *
- * The worker loads the single-threaded wasm-postflop solver and exposes
- * methods for initialisation, solving, and strategy retrieval via Comlink.
+ * Supports both multi-threaded (solver-mt, via SharedArrayBuffer + Rayon)
+ * and single-threaded (solver-st) modes. MT is preferred for performance;
+ * ST is used as a fallback when SharedArrayBuffer is unavailable (e.g. Safari/iOS).
  */
 
+function detectMTSupport(): { enabled: boolean; reason: string } {
+  if (typeof SharedArrayBuffer === 'undefined') {
+    return { enabled: false, reason: 'SharedArrayBuffer unavailable' };
+  }
+  if (typeof Atomics === 'undefined') {
+    return { enabled: false, reason: 'Atomics unavailable' };
+  }
+  if (typeof crossOriginIsolated !== 'undefined' && !crossOriginIsolated) {
+    return { enabled: false, reason: 'crossOriginIsolated=false' };
+  }
+
+  try {
+    const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+    if (!(memory.buffer instanceof SharedArrayBuffer)) {
+      return { enabled: false, reason: 'WASM shared memory buffer is not SharedArrayBuffer' };
+    }
+
+    // initThreadPool internally postMessages WebAssembly.Memory to child workers.
+    // Probe cloneability upfront to avoid noisy runtime DataCloneError stack traces.
+    const channel = new MessageChannel();
+    channel.port1.postMessage(memory);
+    channel.port1.close();
+    channel.port2.close();
+  } catch (e) {
+    return { enabled: false, reason: `shared memory clone probe failed: ${String(e)}` };
+  }
+
+  return { enabled: true, reason: 'ok' };
+}
+
+const mtSupport = detectMTSupport();
+const canUseMT = mtSupport.enabled;
+
 let wasmReady = false;
-let manager: GameManager | null = null;
+let manager: any = null;
+
+// Dynamically loaded module bindings
+let GameManagerClass: any = null;
+let initThreadPoolFn: ((n: number) => Promise<void>) | null = null;
+let exitThreadPoolFn: (() => Promise<void>) | null = null;
 
 const solverAPI = {
   /**
@@ -17,7 +55,34 @@ const solverAPI = {
    */
   async loadWasm(): Promise<void> {
     if (wasmReady) return;
-    await init();
+
+    if (!canUseMT) {
+      console.log('[Worker] solver-mt disabled:', mtSupport.reason);
+    }
+
+    if (canUseMT) {
+      try {
+        const mod = await import('../../../../pkg/solver-mt/solver.js');
+        await mod.default();
+        GameManagerClass = mod.GameManager;
+        initThreadPoolFn = mod.initThreadPool;
+        exitThreadPoolFn = mod.exitThreadPool;
+        const numThreads = Math.min(navigator.hardwareConcurrency || 4, 8);
+        await initThreadPoolFn!(numThreads);
+        console.log('[Worker] solver-mt loaded, threads:', numThreads);
+        wasmReady = true;
+        return;
+      } catch (e) {
+        console.warn('[Worker] solver-mt load failed, falling back to solver-st:', e);
+      }
+    }
+
+    const mod = await import('../../../../pkg/solver-st/solver.js');
+    await mod.default();
+    GameManagerClass = mod.GameManager;
+    initThreadPoolFn = null;
+    exitThreadPoolFn = null;
+    console.log('[Worker] solver-st loaded (fallback)');
     wasmReady = true;
   },
 
@@ -53,7 +118,7 @@ const solverAPI = {
     }
 
     // GameManager.new() is a static factory method
-    manager = GameManager.new();
+    manager = GameManagerClass.new();
 
     // Bet sizing varies by number of remaining streets to keep tree size manageable:
     //   Flop (3 streets): 1 bet size per street, minimal raise
@@ -92,6 +157,7 @@ const solverAPI = {
     const oopTurnDonk = '';
     const oopRiverDonk = '';
 
+    const initStart = performance.now();
     const error = manager.init(
       oopRange,
       ipRange,
@@ -115,15 +181,17 @@ const solverAPI = {
       ipTurnRaise,
       ipRiverBet,
       ipRiverRaise,
-      0.67,       // addAllInThreshold
+      0.80,       // addAllInThreshold (was 0.67)
       0.15,       // forceAllInThreshold
-      0.2,        // mergingThreshold (higher = more merging = smaller tree)
+      0.4,        // mergingThreshold (was 0.2, higher = more merging = smaller tree)
       '',         // addedLines
       '',         // removedLines
     );
+    const initMs = performance.now() - initStart;
 
     // init returns string on error, undefined on success
     if (error !== undefined) {
+      console.log('[Worker] init failed after', initMs.toFixed(0) + 'ms:', error);
       // Don't call free() here — partially initialized GameManager
       // may trigger Rust ownership errors on free
       manager = null;
@@ -131,6 +199,7 @@ const solverAPI = {
     }
 
     // Allocate memory
+    const allocStart = performance.now();
     try {
       manager.allocate_memory(false);
     } catch (e) {
@@ -138,6 +207,9 @@ const solverAPI = {
       manager = null;
       return `Memory allocation failed: ${e}`;
     }
+    const allocMs = performance.now() - allocStart;
+
+    console.log('[Worker] init:', initMs.toFixed(0) + 'ms, allocate:', allocMs.toFixed(0) + 'ms');
     return null;
   },
 
@@ -150,6 +222,7 @@ const solverAPI = {
   ): { iterations: number; exploitability: number } {
     if (!manager) return { iterations: 0, exploitability: Infinity };
 
+    const solveStart = performance.now();
     let exploitability = Infinity;
     let i = 0;
     for (; i < maxIterations; i++) {
@@ -163,6 +236,8 @@ const solverAPI = {
     }
 
     manager.finalize();
+    const solveMs = performance.now() - solveStart;
+    console.log('[Worker] solve:', (i + 1), 'iterations in', solveMs.toFixed(0) + 'ms, exploitability:', exploitability.toFixed(2));
     return { iterations: i + 1, exploitability };
   },
 
@@ -243,10 +318,13 @@ const solverAPI = {
   /**
    * Release solver resources.
    */
-  terminate(): void {
+  async terminate(): Promise<void> {
     if (manager) {
       manager.free();
       manager = null;
+    }
+    if (exitThreadPoolFn) {
+      try { await exitThreadPoolFn(); } catch { /* ignore */ }
     }
     wasmReady = false;
   },

@@ -20,7 +20,9 @@
       "WebFetch(domain:github.com)",
       "Bash(find:*)",
       "Bash(cargo install:*)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(cargo +nightly clean:*)",
+      "Bash(rustup run nightly wasm-pack build:*)"
     ]
   }
 }

@@ -41,11 +41,215 @@ function detectMTSupport(): { enabled: boolean; reason: string } {
 const mtSupport = detectMTSupport();
 const canUseMT = mtSupport.enabled;
 
+type SolverActionType = 'Fold' | 'Check' | 'Call' | 'Bet' | 'Raise' | 'Allin';
+
+interface SolverNodeAction {
+  type: SolverActionType;
+  amount: number;
+}
+
+interface HistoryStepInput {
+  type: SolverActionType;
+  amount: number;
+}
+
+interface HistoryResolutionStep {
+  requested: HistoryStepInput;
+  resolved: SolverNodeAction;
+  actionIndex: number;
+  amountDelta: number;
+}
+
+interface TreeProfile {
+  oopFlopBet: string;
+  ipFlopBet: string;
+  oopFlopRaise: string;
+  ipFlopRaise: string;
+  oopTurnBet: string;
+  ipTurnBet: string;
+  oopTurnRaise: string;
+  ipTurnRaise: string;
+  oopRiverBet: string;
+  ipRiverBet: string;
+  oopRiverRaise: string;
+  ipRiverRaise: string;
+  addAllInThreshold: number;
+  forceAllInThreshold: number;
+  mergingThreshold: number;
+}
+
+interface WasmGameManager {
+  free(): void;
+  init(
+    oopRange: Float32Array,
+    ipRange: Float32Array,
+    board: Uint8Array,
+    startingPot: number,
+    effectiveStack: number,
+    rakeRate: number,
+    rakeCap: number,
+    donkOption: boolean,
+    oopFlopBet: string,
+    oopFlopRaise: string,
+    oopTurnBet: string,
+    oopTurnRaise: string,
+    oopTurnDonk: string,
+    oopRiverBet: string,
+    oopRiverRaise: string,
+    oopRiverDonk: string,
+    ipFlopBet: string,
+    ipFlopRaise: string,
+    ipTurnBet: string,
+    ipTurnRaise: string,
+    ipRiverBet: string,
+    ipRiverRaise: string,
+    addAllInThreshold: number,
+    forceAllInThreshold: number,
+    mergingThreshold: number,
+    addedLines: string,
+    removedLines: string,
+  ): string | undefined;
+  allocate_memory(enableCompression: boolean): void;
+  solve_step(currentIteration: number): void;
+  exploitability(): number;
+  finalize(): void;
+  apply_history(history: Uint32Array): void;
+  current_player(): string;
+  actions_after(append: Uint32Array): string;
+  get_results(): Float64Array;
+  private_cards(player: number): Uint16Array;
+  num_actions(): number;
+}
+
+interface WasmGameManagerFactory {
+  new: () => WasmGameManager;
+}
+
+function normalizeActionType(type: string): SolverActionType | null {
+  if (type === 'AllIn') return 'Allin';
+  if (type === 'Fold' || type === 'Check' || type === 'Call' || type === 'Bet' || type === 'Raise' || type === 'Allin') {
+    return type;
+  }
+  return null;
+}
+
+function parseActionString(actionsStr: string): SolverNodeAction[] {
+  if (!actionsStr || actionsStr === 'terminal' || actionsStr === 'chance') {
+    return [];
+  }
+
+  const actions: SolverNodeAction[] = [];
+  for (const part of actionsStr.split('/')) {
+    const [rawType, amountStr] = part.split(':');
+    const type = normalizeActionType(rawType);
+    if (!type) continue;
+    const amount = Number.parseInt(amountStr ?? '0', 10);
+    actions.push({
+      type,
+      amount: Number.isFinite(amount) ? amount : 0,
+    });
+  }
+  return actions;
+}
+
+function selectActionIndex(
+  requested: HistoryStepInput,
+  available: SolverNodeAction[],
+): { index: number; amountDelta: number } | null {
+  const requestedType = normalizeActionType(requested.type);
+  if (!requestedType) return null;
+
+  const candidates = available
+    .map((action, index) => ({ action, index }))
+    .filter(x => x.action.type === requestedType);
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  if (requestedType === 'Fold' || requestedType === 'Check' || requestedType === 'Call') {
+    return { index: candidates[0].index, amountDelta: 0 };
+  }
+
+  let best = candidates[0];
+  let bestDelta = Math.abs(best.action.amount - requested.amount);
+  for (let i = 1; i < candidates.length; i++) {
+    const delta = Math.abs(candidates[i].action.amount - requested.amount);
+    if (delta < bestDelta) {
+      best = candidates[i];
+      bestDelta = delta;
+    }
+  }
+
+  return { index: best.index, amountDelta: bestDelta };
+}
+
+function getTreeProfile(streetsLeft: number): TreeProfile {
+  // Profile tuned for stronger strategy quality under medium/long per-street budgets.
+  if (streetsLeft >= 3) {
+    return {
+      oopFlopBet: '33%,66%',
+      ipFlopBet: '33%,66%',
+      oopFlopRaise: '2.5x',
+      ipFlopRaise: '2.5x',
+      oopTurnBet: '66%',
+      ipTurnBet: '66%',
+      oopTurnRaise: '2.5x',
+      ipTurnRaise: '2.5x',
+      oopRiverBet: '75%,125%',
+      ipRiverBet: '75%,125%',
+      oopRiverRaise: '2.5x',
+      ipRiverRaise: '2.5x',
+      addAllInThreshold: 0.88,
+      forceAllInThreshold: 0.2,
+      mergingThreshold: 0.45,
+    };
+  }
+
+  if (streetsLeft === 2) {
+    return {
+      oopFlopBet: '33%,75%',
+      ipFlopBet: '33%,75%',
+      oopFlopRaise: '2.5x',
+      ipFlopRaise: '2.5x',
+      oopTurnBet: '50%,100%',
+      ipTurnBet: '50%,100%',
+      oopTurnRaise: '2.5x',
+      ipTurnRaise: '2.5x',
+      oopRiverBet: '66%,125%',
+      ipRiverBet: '66%,125%',
+      oopRiverRaise: '2.5x',
+      ipRiverRaise: '2.5x',
+      addAllInThreshold: 0.85,
+      forceAllInThreshold: 0.2,
+      mergingThreshold: 0.32,
+    };
+  }
+
+  return {
+    oopFlopBet: '33%,75%',
+    ipFlopBet: '33%,75%',
+    oopFlopRaise: '2.5x',
+    ipFlopRaise: '2.5x',
+    oopTurnBet: '50%,100%',
+    ipTurnBet: '50%,100%',
+    oopTurnRaise: '2.5x',
+    ipTurnRaise: '2.5x',
+    oopRiverBet: '66%,125%',
+    ipRiverBet: '66%,125%',
+    oopRiverRaise: '2.5x',
+    ipRiverRaise: '2.5x',
+    addAllInThreshold: 0.82,
+    forceAllInThreshold: 0.15,
+    mergingThreshold: 0.3,
+  };
+}
+
 let wasmReady = false;
-let manager: any = null;
+let manager: WasmGameManager | null = null;
 
 // Dynamically loaded module bindings
-let GameManagerClass: any = null;
+let GameManagerClass: WasmGameManagerFactory | null = null;
 let initThreadPoolFn: ((n: number) => Promise<void>) | null = null;
 let exitThreadPoolFn: (() => Promise<void>) | null = null;
 
@@ -64,7 +268,7 @@ const solverAPI = {
       try {
         const mod = await import('../../../../pkg/solver-mt/solver.js');
         await mod.default();
-        GameManagerClass = mod.GameManager;
+        GameManagerClass = mod.GameManager as unknown as WasmGameManagerFactory;
         initThreadPoolFn = mod.initThreadPool;
         exitThreadPoolFn = mod.exitThreadPool;
         const numThreads = Math.min(navigator.hardwareConcurrency || 4, 8);
@@ -79,7 +283,7 @@ const solverAPI = {
 
     const mod = await import('../../../../pkg/solver-st/solver.js');
     await mod.default();
-    GameManagerClass = mod.GameManager;
+    GameManagerClass = mod.GameManager as unknown as WasmGameManagerFactory;
     initThreadPoolFn = null;
     exitThreadPoolFn = null;
     console.log('[Worker] solver-st loaded (fallback)');
@@ -118,47 +322,23 @@ const solverAPI = {
     }
 
     // GameManager.new() is a static factory method
-    manager = GameManagerClass.new();
+    if (!GameManagerClass) {
+      return 'GameManager class is not loaded';
+    }
+    const gm = GameManagerClass.new();
+    manager = gm;
 
     // Bet sizing varies by number of remaining streets to keep tree size manageable:
-    //   Flop (3 streets): 1 bet size per street, minimal raise
-    //   Turn (2 streets): 2 bet sizes on river, 1 on turn
-    //   River (1 street): 2 bet sizes
+    //   Flop: quality-priority profile
+    //   Turn: balanced profile
+    //   River: speed-priority profile
     const streetsLeft = 6 - board.length; // 3=flop, 2=turn, 1=river
-    let oopFlopBet: string, ipFlopBet: string, oopFlopRaise: string, ipFlopRaise: string;
-    let oopTurnBet: string, ipTurnBet: string, oopTurnRaise: string, ipTurnRaise: string;
-    let oopRiverBet: string, ipRiverBet: string, oopRiverRaise: string, ipRiverRaise: string;
-
-    if (streetsLeft >= 3) {
-      // Flop: very simple tree — 1 size per street
-      oopFlopBet = '33%';   ipFlopBet = '33%';
-      oopFlopRaise = '2x';  ipFlopRaise = '2x';
-      oopTurnBet = '66%';   ipTurnBet = '66%';
-      oopTurnRaise = '2x';  ipTurnRaise = '2x';
-      oopRiverBet = '75%';  ipRiverBet = '75%';
-      oopRiverRaise = '2x'; ipRiverRaise = '2x';
-    } else if (streetsLeft === 2) {
-      // Turn: medium complexity
-      oopFlopBet = '33%,75%'; ipFlopBet = '33%,75%';
-      oopFlopRaise = '2.5x';  ipFlopRaise = '2.5x';
-      oopTurnBet = '50%,75%'; ipTurnBet = '50%,75%';
-      oopTurnRaise = '2.5x';  ipTurnRaise = '2.5x';
-      oopRiverBet = '66%,100%'; ipRiverBet = '66%,100%';
-      oopRiverRaise = '2.5x';   ipRiverRaise = '2.5x';
-    } else {
-      // River: full complexity
-      oopFlopBet = '33%,75%'; ipFlopBet = '33%,75%';
-      oopFlopRaise = '2.5x';  ipFlopRaise = '2.5x';
-      oopTurnBet = '50%,75%'; ipTurnBet = '50%,75%';
-      oopTurnRaise = '2.5x';  ipTurnRaise = '2.5x';
-      oopRiverBet = '66%,100%'; ipRiverBet = '66%,100%';
-      oopRiverRaise = '2.5x';   ipRiverRaise = '2.5x';
-    }
+    const profile = getTreeProfile(streetsLeft);
     const oopTurnDonk = '';
     const oopRiverDonk = '';
 
     const initStart = performance.now();
-    const error = manager.init(
+    const error = gm.init(
       oopRange,
       ipRange,
       board,
@@ -167,23 +347,23 @@ const solverAPI = {
       0,          // rake_rate
       0,          // rake_cap
       false,      // donk_option
-      oopFlopBet,
-      oopFlopRaise,
-      oopTurnBet,
-      oopTurnRaise,
+      profile.oopFlopBet,
+      profile.oopFlopRaise,
+      profile.oopTurnBet,
+      profile.oopTurnRaise,
       oopTurnDonk,
-      oopRiverBet,
-      oopRiverRaise,
+      profile.oopRiverBet,
+      profile.oopRiverRaise,
       oopRiverDonk,
-      ipFlopBet,
-      ipFlopRaise,
-      ipTurnBet,
-      ipTurnRaise,
-      ipRiverBet,
-      ipRiverRaise,
-      0.80,       // addAllInThreshold (was 0.67)
-      0.15,       // forceAllInThreshold
-      0.4,        // mergingThreshold (was 0.2, higher = more merging = smaller tree)
+      profile.ipFlopBet,
+      profile.ipFlopRaise,
+      profile.ipTurnBet,
+      profile.ipTurnRaise,
+      profile.ipRiverBet,
+      profile.ipRiverRaise,
+      profile.addAllInThreshold,
+      profile.forceAllInThreshold,
+      profile.mergingThreshold,
       '',         // addedLines
       '',         // removedLines
     );
@@ -201,7 +381,7 @@ const solverAPI = {
     // Allocate memory
     const allocStart = performance.now();
     try {
-      manager.allocate_memory(false);
+      gm.allocate_memory(false);
     } catch (e) {
       // Same: don't free a failed-allocation manager
       manager = null;
@@ -214,22 +394,108 @@ const solverAPI = {
   },
 
   /**
+   * Resolve game action history into solver action indices.
+   * Mapping is done step-by-step against currently available solver actions.
+   */
+  resolveHistory(steps: HistoryStepInput[]): {
+    history: number[];
+    mappedSteps: HistoryResolutionStep[];
+    currentPlayer: string;
+    error: string | null;
+  } {
+    if (!manager) {
+      return {
+        history: [],
+        mappedSteps: [],
+        currentPlayer: 'terminal',
+        error: 'Solver manager is not initialized',
+      };
+    }
+
+    const history: number[] = [];
+    const mappedSteps: HistoryResolutionStep[] = [];
+
+    for (const step of steps) {
+      manager.apply_history(new Uint32Array(history));
+      const currentPlayer = manager.current_player();
+      if (currentPlayer === 'terminal' || currentPlayer === 'chance') {
+        manager.apply_history(new Uint32Array([]));
+        return {
+          history,
+          mappedSteps,
+          currentPlayer,
+          error: `Reached ${currentPlayer} while resolving history`,
+        };
+      }
+
+      const available = parseActionString(manager.actions_after(new Uint32Array([])));
+      const selected = selectActionIndex(step, available);
+      if (!selected) {
+        manager.apply_history(new Uint32Array([]));
+        return {
+          history,
+          mappedSteps,
+          currentPlayer,
+          error: `No matching action for ${step.type}:${step.amount}`,
+        };
+      }
+
+      history.push(selected.index);
+      mappedSteps.push({
+        requested: step,
+        resolved: available[selected.index],
+        actionIndex: selected.index,
+        amountDelta: selected.amountDelta,
+      });
+    }
+
+    manager.apply_history(new Uint32Array(history));
+    const currentPlayer = manager.current_player();
+    manager.apply_history(new Uint32Array([]));
+
+    return {
+      history,
+      mappedSteps,
+      currentPlayer,
+      error: null,
+    };
+  },
+
+  /**
    * Run CFR iterations until convergence or max iterations.
    */
   solve(
     maxIterations: number,
     targetExploitability: number,
-  ): { iterations: number; exploitability: number } {
-    if (!manager) return { iterations: 0, exploitability: Infinity };
+    timeBudgetMs: number,
+    checkInterval: number,
+  ): { iterations: number; exploitability: number; elapsedMs: number; stoppedBy: 'target' | 'time_budget' | 'max_iterations' } {
+    if (!manager) {
+      return {
+        iterations: 0,
+        exploitability: Infinity,
+        elapsedMs: 0,
+        stoppedBy: 'max_iterations',
+      };
+    }
 
     const solveStart = performance.now();
     let exploitability = Infinity;
     let i = 0;
+    let stoppedBy: 'target' | 'time_budget' | 'max_iterations' = 'max_iterations';
+    const checkpoint = Math.max(1, Math.floor(checkInterval));
+    const hasTimeBudget = Number.isFinite(timeBudgetMs) && timeBudgetMs > 0;
+
     for (; i < maxIterations; i++) {
       manager.solve_step(i);
-      if ((i + 1) % 10 === 0 || i === maxIterations - 1) {
+      if ((i + 1) % checkpoint === 0 || i === maxIterations - 1) {
         exploitability = manager.exploitability();
         if (exploitability <= targetExploitability) {
+          stoppedBy = 'target';
+          break;
+        }
+        if (hasTimeBudget && performance.now() - solveStart >= timeBudgetMs) {
+          stoppedBy = 'time_budget';
           break;
         }
       }
@@ -237,8 +503,24 @@ const solverAPI = {
 
     manager.finalize();
     const solveMs = performance.now() - solveStart;
-    console.log('[Worker] solve:', (i + 1), 'iterations in', solveMs.toFixed(0) + 'ms, exploitability:', exploitability.toFixed(2));
-    return { iterations: i + 1, exploitability };
+    if (!Number.isFinite(exploitability)) {
+      exploitability = manager.exploitability();
+    }
+    console.log(
+      '[Worker] solve:',
+      (i + 1),
+      'iterations in',
+      solveMs.toFixed(0) + 'ms, exploitability:',
+      exploitability.toFixed(2),
+      'stoppedBy:',
+      stoppedBy,
+    );
+    return {
+      iterations: i + 1,
+      exploitability,
+      elapsedMs: solveMs,
+      stoppedBy,
+    };
   },
 
   /**

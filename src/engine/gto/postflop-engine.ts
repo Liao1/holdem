@@ -1,5 +1,5 @@
 import type { Player, GameState, PlayerAction, LegalAction } from '../types';
-import { ActionType } from '../types';
+import { ActionType, GamePhase } from '../types';
 import { BIG_BLIND } from '../constants';
 import { isInPosition } from './position';
 import { solve } from './solver/solver-bridge';
@@ -9,6 +9,13 @@ import { buildRanges } from './solver/range-builder';
 
 const RANK_CHARS = '  23456789TJQKA';
 const SUIT_CHARS: Record<string, string> = { clubs: 'c', diamonds: 'd', hearts: 'h', spades: 's' };
+
+interface StreetHistoryContext {
+  historyActions: SolverAction[];
+  streetContribution: number;
+  playerStreetBets: Map<string, number>;
+}
+
 function cardStr(c: { rank: number; suit: string }): string {
   return (RANK_CHARS[c.rank] || '?') + (SUIT_CHARS[c.suit] || '?');
 }
@@ -72,41 +79,74 @@ async function trySolverAction(
     // Convert board to solver IDs
     const board = boardToSolverIds(gameState.communityCards);
 
-    // Calculate starting pot and effective stack
-    // starting_pot = total pot (including current bets from all players)
-    // effective_stack = remaining chips behind (NOT including currentBet, which is already in pot)
-    const startingPot = getTotalPot(gameState);
+    const currentTotalPot = getTotalPot(gameState);
+    const streetHistory = buildStreetHistoryContext(gameState);
+    const startingPot = Math.max(currentTotalPot - streetHistory.streetContribution, BIG_BLIND);
+
+    // effective_stack is measured from the start of the current street
     const maxOpponentChips = Math.max(
       ...opponentIds.map(id => {
         const p = gameState.players.find(pl => pl.id === id)!;
-        return p.chips;
+        const streetBet = streetHistory.playerStreetBets.get(id) || 0;
+        return p.chips + streetBet;
       }),
     );
-    let effectiveStack = Math.min(player.chips, maxOpponentChips);
+    const playerStreetBet = streetHistory.playerStreetBets.get(player.id) || 0;
+    let effectiveStack = Math.min(player.chips + playerStreetBet, maxOpponentChips);
 
-    // Cap SPR based on remaining streets to keep game tree manageable
-    // Flop (3 streets) = smallest cap, River (1 street) = largest cap
+    // Cap SPR based on remaining streets to keep game tree manageable.
     const numBoardCards = gameState.communityCards.length;
-    const MAX_SPR = numBoardCards === 3 ? 4 : numBoardCards === 4 ? 8 : 15;
-    if (effectiveStack > startingPot * MAX_SPR) {
-      const capped = Math.floor(startingPot * MAX_SPR);
+    const maxSpr = numBoardCards === 3 ? 6 : numBoardCards === 4 ? 10 : 15;
+    if (effectiveStack > startingPot * maxSpr) {
+      const capped = Math.floor(startingPot * maxSpr);
       console.log('[PostflopEngine] SPR cap: stack', effectiveStack, '→', capped, '(pot:', startingPot, 'streets:', 6 - numBoardCards, ')');
       effectiveStack = capped;
     }
-    console.log('[PostflopEngine] pot:', startingPot, 'effectiveStack:', effectiveStack, 'SPR:', (effectiveStack / startingPot).toFixed(1));
+
+    console.log('[PostflopEngine] currentPot:', currentTotalPot, 'streetStartPot:', startingPot);
+    console.log('[PostflopEngine] street history:', streetHistory.historyActions.map(a => `${a.type}:${a.amount}`).join(' / ') || '(none)');
+    console.log('[PostflopEngine] effectiveStack:', effectiveStack, 'SPR:', (effectiveStack / startingPot).toFixed(1));
+
+    const timeBudgetMs = numBoardCards === 3 ? 30000 : 10000;
 
     // Solve
-    const result = await solve(oopRange, ipRange, board, startingPot, effectiveStack);
+    const result = await solve(oopRange, ipRange, board, startingPot, effectiveStack, {
+      historyActions: streetHistory.historyActions,
+      currentTotalPot,
+      targetExploitabilityPctOfCurrentPot: 0.5,
+      timeBudgetMs,
+    });
+
     if (!result) {
       console.warn('[PostflopEngine] Solver returned null');
       return null;
     }
 
+    const expectedPlayer = ip ? 'ip' : 'oop';
+    const enforcePlayerMatch = opponentIds.length === 1;
+    if (result.currentPlayer !== expectedPlayer) {
+      console.warn('[PostflopEngine] Solver player mismatch:', {
+        expectedPlayer,
+        solverPlayer: result.currentPlayer,
+        resolvedHistory: result.history,
+        enforcePlayerMatch,
+      });
+      if (enforcePlayerMatch) {
+        return null;
+      }
+    }
+
     console.log('[PostflopEngine] === Solver Output ===');
-    console.log('[PostflopEngine] iterations:', result.iterations, 'exploitability:', result.exploitability.toFixed(2));
+    console.log('[PostflopEngine] iterations:', result.iterations, 'elapsedMs:', result.elapsedMs.toFixed(0), 'stoppedBy:', result.stoppedBy);
+    console.log('[PostflopEngine] exploitability:', result.exploitability.toFixed(2), `(${result.exploitabilityPctOfCurrentPot.toFixed(2)}% pot)`, 'target:', result.targetExploitability.toFixed(2));
+    console.log('[PostflopEngine] resolved history indices:', result.history.join(',') || '(root)');
     console.log('[PostflopEngine] currentPlayer:', result.currentPlayer);
     console.log('[PostflopEngine] actions:', result.actions.map(a => `${a.type}:${a.amount}`).join(' / '));
     console.log('[PostflopEngine] numHands (private combos):', result.numHands);
+    if (result.actions.length === 0) {
+      console.warn('[PostflopEngine] Solver returned empty actions');
+      return null;
+    }
 
     // Find the bot's hand in the solver's private cards
     const handIdx = findHandInPrivateCards(player.holeCards, result.privateCards);
@@ -114,6 +154,7 @@ async function trySolverAction(
       console.warn('[PostflopEngine] Hand', holeStr, 'not found in privateCards');
       return null;
     }
+
     // Decode the matched combo for verification
     const packed = result.privateCards[handIdx];
     const matchedC1 = solverIdToCard(packed & 0xff);
@@ -137,13 +178,23 @@ async function trySolverAction(
 
     // Sample an action according to the strategy probabilities
     const chosenIdx = sampleAction(handStrategy);
-    const chosenSolverAction = result.actions[chosenIdx];
+    const chosenSolverAction = result.actions[chosenIdx] || result.actions[0];
     console.log('[PostflopEngine] === Sampled Action ===');
     console.log('[PostflopEngine] chosen:', chosenSolverAction.type, 'amount:', chosenSolverAction.amount);
 
     // Map solver action → game action
     const finalAction = mapSolverAction(chosenSolverAction, player, legalActions);
-    console.log('[PostflopEngine] → final game action:', finalAction.type, 'amount:', finalAction.amount);
+    console.log('[PostflopEngine] decision trace:', {
+      sampled: chosenSolverAction,
+      final: { type: finalAction.type, amount: finalAction.amount },
+      legal: legalActions.map(a => ({
+        type: a.type,
+        callAmount: a.callAmount,
+        minAmount: a.minAmount,
+        maxAmount: a.maxAmount,
+      })),
+    });
+
     return finalAction;
   } catch (e) {
     console.warn('[PostflopEngine] Solver failed:', e);
@@ -155,15 +206,16 @@ async function trySolverAction(
  * Sample an action index from a probability distribution.
  */
 function sampleAction(probabilities: number[]): number {
-  const total = probabilities.reduce((sum, p) => sum + p, 0);
+  const sanitized = probabilities.map(p => (Number.isFinite(p) && p > 0 ? p : 0));
+  const total = sanitized.reduce((sum, p) => sum + p, 0);
   if (total <= 0) return 0;
 
   let roll = Math.random() * total;
-  for (let i = 0; i < probabilities.length; i++) {
-    roll -= probabilities[i];
+  for (let i = 0; i < sanitized.length; i++) {
+    roll -= sanitized[i];
     if (roll <= 0) return i;
   }
-  return probabilities.length - 1;
+  return sanitized.length - 1;
 }
 
 /**
@@ -185,15 +237,26 @@ function mapSolverAction(
       return { type: ActionType.FOLD, amount: 0, playerId };
     }
 
-    case 'Check':
-      return { type: ActionType.CHECK, amount: 0, playerId };
+    case 'Check': {
+      if (legalActions.some(a => a.type === ActionType.CHECK)) {
+        return { type: ActionType.CHECK, amount: 0, playerId };
+      }
+      const call = legalActions.find(a => a.type === ActionType.CALL);
+      if (call) {
+        return { type: ActionType.CALL, amount: call.callAmount || 0, playerId };
+      }
+      return { type: ActionType.FOLD, amount: 0, playerId };
+    }
 
     case 'Call': {
       const call = legalActions.find(a => a.type === ActionType.CALL);
       if (call) {
         return { type: ActionType.CALL, amount: call.callAmount || 0, playerId };
       }
-      return { type: ActionType.CHECK, amount: 0, playerId };
+      if (legalActions.some(a => a.type === ActionType.CHECK)) {
+        return { type: ActionType.CHECK, amount: 0, playerId };
+      }
+      return { type: ActionType.FOLD, amount: 0, playerId };
     }
 
     case 'Bet': {
@@ -204,8 +267,25 @@ function mapSolverAction(
         const clamped = Math.min(Math.max(solverAction.amount, min), max);
         return { type: ActionType.BET, amount: clamped, playerId };
       }
-      // Fallback to check
-      return { type: ActionType.CHECK, amount: 0, playerId };
+
+      const raise = legalActions.find(a => a.type === ActionType.RAISE);
+      if (raise) {
+        const min = raise.minAmount || 0;
+        const max = raise.maxAmount || min;
+        const clamped = Math.min(Math.max(solverAction.amount, min), max);
+        return { type: ActionType.RAISE, amount: clamped, playerId };
+      }
+
+      if (legalActions.some(a => a.type === ActionType.CHECK)) {
+        return { type: ActionType.CHECK, amount: 0, playerId };
+      }
+
+      const call = legalActions.find(a => a.type === ActionType.CALL);
+      if (call) {
+        return { type: ActionType.CALL, amount: call.callAmount || 0, playerId };
+      }
+
+      return { type: ActionType.FOLD, amount: 0, playerId };
     }
 
     case 'Raise': {
@@ -216,12 +296,18 @@ function mapSolverAction(
         const clamped = Math.min(Math.max(solverAction.amount, min), max);
         return { type: ActionType.RAISE, amount: clamped, playerId };
       }
+
       // Fallback to call
       const call = legalActions.find(a => a.type === ActionType.CALL);
       if (call) {
         return { type: ActionType.CALL, amount: call.callAmount || 0, playerId };
       }
-      return { type: ActionType.CHECK, amount: 0, playerId };
+
+      if (legalActions.some(a => a.type === ActionType.CHECK)) {
+        return { type: ActionType.CHECK, amount: 0, playerId };
+      }
+
+      return { type: ActionType.FOLD, amount: 0, playerId };
     }
 
     case 'Allin': {
@@ -229,27 +315,99 @@ function mapSolverAction(
       if (allIn) {
         return { type: ActionType.ALL_IN, amount: allIn.maxAmount || player.chips, playerId };
       }
+
       // Fallback: try raise to max
       const raise = legalActions.find(a => a.type === ActionType.RAISE);
       if (raise) {
         return { type: ActionType.RAISE, amount: raise.maxAmount || 0, playerId };
       }
+
       const call = legalActions.find(a => a.type === ActionType.CALL);
       if (call) {
         return { type: ActionType.CALL, amount: call.callAmount || 0, playerId };
       }
-      return { type: ActionType.CHECK, amount: 0, playerId };
+
+      if (legalActions.some(a => a.type === ActionType.CHECK)) {
+        return { type: ActionType.CHECK, amount: 0, playerId };
+      }
+
+      return { type: ActionType.FOLD, amount: 0, playerId };
     }
   }
 }
 
 function getTotalPot(gameState: GameState): number {
-  let total = 0;
-  for (const pot of gameState.pots) {
-    total += pot.amount;
+  const fromPots = gameState.pots.reduce((sum, pot) => sum + pot.amount, 0);
+  if (fromPots > 0) {
+    return fromPots;
   }
-  for (const p of gameState.players) {
-    total += p.currentBet;
+
+  const committed = gameState.players.reduce((sum, p) => sum + p.totalBetThisHand, 0);
+  return Math.max(committed, BIG_BLIND);
+}
+
+function buildStreetHistoryContext(gameState: GameState): StreetHistoryContext {
+  if (gameState.phase !== GamePhase.FLOP && gameState.phase !== GamePhase.TURN && gameState.phase !== GamePhase.RIVER) {
+    return {
+      historyActions: [],
+      streetContribution: 0,
+      playerStreetBets: new Map(),
+    };
   }
-  return Math.max(total, BIG_BLIND);
+
+  const playerStreetBets = new Map<string, number>();
+  const historyActions: SolverAction[] = [];
+
+  const streetEntries = gameState.actionLog.filter(
+    e => e.handNumber === gameState.handNumber && e.phase === gameState.phase,
+  );
+
+  for (const entry of streetEntries) {
+    const prevBet = playerStreetBets.get(entry.playerId) || 0;
+    const amount = Math.max(entry.amount, 0);
+
+    switch (entry.action) {
+      case ActionType.FOLD:
+        historyActions.push({ type: 'Fold', amount: 0 });
+        break;
+      case ActionType.CHECK:
+        historyActions.push({ type: 'Check', amount: 0 });
+        break;
+      case ActionType.CALL: {
+        const nextBet = prevBet + amount;
+        playerStreetBets.set(entry.playerId, nextBet);
+        historyActions.push({ type: 'Call', amount: 0 });
+        break;
+      }
+      case ActionType.BET: {
+        const nextBet = prevBet + amount;
+        playerStreetBets.set(entry.playerId, nextBet);
+        historyActions.push({ type: 'Bet', amount: nextBet });
+        break;
+      }
+      case ActionType.RAISE: {
+        const raiseTo = Math.max(amount, prevBet);
+        playerStreetBets.set(entry.playerId, raiseTo);
+        historyActions.push({ type: 'Raise', amount: raiseTo });
+        break;
+      }
+      case ActionType.ALL_IN: {
+        const nextBet = prevBet + amount;
+        playerStreetBets.set(entry.playerId, nextBet);
+        historyActions.push({ type: 'Allin', amount: nextBet });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  const streetContribution = Array.from(playerStreetBets.values())
+    .reduce((sum, v) => sum + v, 0);
+
+  return {
+    historyActions,
+    streetContribution,
+    playerStreetBets,
+  };
 }

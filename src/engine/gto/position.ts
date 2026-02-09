@@ -84,17 +84,27 @@ export function getPositionCategory(pos: Position): PositionCategory {
 
 /**
  * Check if a player is in position (acts last postflop).
- * BTN is always in position; in heads-up, non-BB is IP.
+ * Determined among players still in the hand (ACTIVE/ALL_IN),
+ * based on postflop acting order (left of dealer acts first).
  */
 export function isInPosition(player: Player, gameState: GameState): boolean {
-  const pos = getPlayerPosition(player, gameState);
-  const activePlayers = gameState.players.filter(
-    p => p.status !== 'BUSTED' && p.status !== 'SITTING_OUT'
-  );
-  if (activePlayers.length === 2) {
-    return pos === Position.SB; // HU: dealer/SB is IP postflop
+  const inHandPlayers = gameState.players
+    .filter(p => p.status === 'ACTIVE' || p.status === 'ALL_IN')
+    .sort((a, b) => a.seatIndex - b.seatIndex);
+  if (inHandPlayers.length <= 1) {
+    return false;
   }
-  return pos === Position.BTN;
+
+  const dealerSeat = gameState.dealerIndex;
+  const startIdx = inHandPlayers.findIndex(p => p.seatIndex > dealerSeat);
+  const firstToActIdx = startIdx === -1 ? 0 : startIdx;
+
+  const ordered: Player[] = [];
+  for (let i = 0; i < inHandPlayers.length; i++) {
+    ordered.push(inHandPlayers[(firstToActIdx + i) % inHandPlayers.length]);
+  }
+
+  return ordered[ordered.length - 1]?.id === player.id;
 }
 
 /**

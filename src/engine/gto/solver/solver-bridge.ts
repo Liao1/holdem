@@ -6,16 +6,44 @@ export interface SolverAction {
   amount: number;
 }
 
+export interface HistoryResolutionStep {
+  requested: SolverAction;
+  resolved: SolverAction;
+  actionIndex: number;
+  amountDelta: number;
+}
+
+export interface SolveOptions {
+  /** Current-street action sequence in game terms to be resolved into solver indices. */
+  historyActions?: SolverAction[];
+  /** Target exploitability as a percentage of current total pot (default: 0.5). */
+  targetExploitabilityPctOfCurrentPot?: number;
+  /** Current total pot at decision point; used for exploitability target normalization. */
+  currentTotalPot?: number;
+  /** Time budget in ms (defaults by street: flop 15s / turn 6s / river 2s). */
+  timeBudgetMs?: number;
+  /** Max CFR iterations (defaults by street). */
+  maxIterations?: number;
+  /** Exploitability check interval in iterations. */
+  checkInterval?: number;
+}
+
 export interface SolverResult {
   actions: SolverAction[];
-  /** strategy[handIndex * numActions + actionIndex] = probability */
+  /** strategy[actionIndex * numHands + handIndex] = probability */
   strategy: number[];
   numHands: number;
   currentPlayer: 'oop' | 'ip';
   /** Private card combos as packed Uint16Array */
   privateCards: Uint16Array;
+  history: number[];
+  historyMapping: HistoryResolutionStep[];
   iterations: number;
   exploitability: number;
+  targetExploitability: number;
+  exploitabilityPctOfCurrentPot: number;
+  elapsedMs: number;
+  stoppedBy: 'target' | 'time_budget' | 'max_iterations';
 }
 
 /**
@@ -23,13 +51,37 @@ export interface SolverResult {
  * into structured SolverAction[].
  */
 function parseActions(actionsStr: string): SolverAction[] {
+  if (!actionsStr || actionsStr === 'terminal' || actionsStr === 'chance') {
+    return [];
+  }
+
   return actionsStr.split('/').map(part => {
     const [type, amountStr] = part.split(':');
+    const amount = Number.parseInt(amountStr ?? '0', 10);
     return {
       type: type as SolverAction['type'],
-      amount: parseInt(amountStr, 10),
+      amount: Number.isFinite(amount) ? amount : 0,
     };
   });
+}
+
+function defaultTimeBudgetMs(boardLen: number): number {
+  if (boardLen === 3) return 30_000;
+  if (boardLen === 4) return 10_000;
+  return 10_000;
+}
+
+function defaultMaxIterations(boardLen: number): number {
+  if (boardLen === 3) return 60_000;
+  if (boardLen === 4) return 24_000;
+  return 24_000;
+}
+
+function defaultCheckInterval(boardLen: number): number {
+  // Keep budget enforcement tight to avoid large budget overshoot.
+  if (boardLen === 3) return 1;
+  if (boardLen === 4) return 1;
+  return 2;
 }
 
 let worker: Worker | null = null;
@@ -69,7 +121,7 @@ async function ensureReady(): Promise<boolean> {
  * @param board     Solver card IDs for community cards
  * @param startingPot Pot at the start of postflop
  * @param effectiveStack Remaining effective stack
- * @param history   Action indices to navigate the game tree to current node
+ * @param options   Solver target/budget/history options
  * @returns SolverResult or null on failure
  */
 export async function solve(
@@ -78,21 +130,30 @@ export async function solve(
   board: Uint8Array,
   startingPot: number,
   effectiveStack: number,
-  history: number[] = [],
+  options: SolveOptions = {},
 ): Promise<SolverResult | null> {
   const ready = await ensureReady();
   if (!ready || !proxy) return null;
 
   try {
+    const historyActions = options.historyActions ?? [];
+    const currentTotalPot = Math.max(options.currentTotalPot ?? startingPot, 1);
+    const targetPct = options.targetExploitabilityPctOfCurrentPot ?? 0.5;
+    const targetExploitability = currentTotalPot * (targetPct / 100);
+    const timeBudgetMs = options.timeBudgetMs ?? defaultTimeBudgetMs(board.length);
+    const maxIterations = options.maxIterations ?? defaultMaxIterations(board.length);
+    const checkInterval = options.checkInterval ?? defaultCheckInterval(board.length);
+
     // Log inputs
     const oopNonZero = oopRange.reduce((n, w) => n + (w > 0 ? 1 : 0), 0);
     const ipNonZero = ipRange.reduce((n, w) => n + (w > 0 ? 1 : 0), 0);
     console.log('[SolverBridge] === WASM Input ===');
     console.log('[SolverBridge] board:', Array.from(board));
     console.log('[SolverBridge] startingPot:', startingPot, 'effectiveStack:', effectiveStack);
+    console.log('[SolverBridge] currentTotalPot:', currentTotalPot, 'targetPct:', targetPct);
     console.log('[SolverBridge] oopRange non-zero combos:', oopNonZero, '/ 1326');
     console.log('[SolverBridge] ipRange non-zero combos:', ipNonZero, '/ 1326');
-    console.log('[SolverBridge] history:', history);
+    console.log('[SolverBridge] history actions:', historyActions.map(a => `${a.type}:${a.amount}`).join(' / '));
 
     // Initialize the game tree
     const initError = await proxy.init(
@@ -108,19 +169,41 @@ export async function solve(
       return null;
     }
 
-    // Fewer iterations for larger trees (flop=3 streets vs river=1 street)
-    const streetsLeft = 6 - board.length;
-    const maxIterations = streetsLeft >= 3 ? 40 : streetsLeft === 2 ? 80 : 200;
-    const targetExploitability = startingPot * 0.02;
-    console.log('[SolverBridge] solving: maxIter=%d, targetExpl=%.2f, streets=%d', maxIterations, targetExploitability, streetsLeft);
-    const solveStart = performance.now();
-    const solveResult = await proxy.solve(maxIterations, targetExploitability);
-    const solveMs = performance.now() - solveStart;
+    const historyResolution = await proxy.resolveHistory(historyActions);
+    if (historyResolution.error) {
+      console.warn('[SolverBridge] Failed to resolve history:', historyResolution.error);
+      return null;
+    }
+
+    console.log('[SolverBridge] resolved history:', historyResolution.history);
+    if (historyResolution.mappedSteps.length > 0) {
+      console.log('[SolverBridge] mapped steps:', historyResolution.mappedSteps.map(step =>
+        `${step.requested.type}:${step.requested.amount} -> ${step.resolved.type}:${step.resolved.amount} [idx=${step.actionIndex}]`,
+      ).join(' | '));
+    }
+
+    console.log(
+      '[SolverBridge] solving: maxIter=%d, targetExpl=%.2f, budgetMs=%d, checkEvery=%d',
+      maxIterations,
+      targetExploitability,
+      timeBudgetMs,
+      checkInterval,
+    );
+    const solveResult = await proxy.solve(maxIterations, targetExploitability, timeBudgetMs, checkInterval);
     console.log('[SolverBridge] === WASM Solve Result ===');
-    console.log('[SolverBridge] iterations:', solveResult.iterations, 'exploitability:', solveResult.exploitability, 'time:', solveMs.toFixed(0) + 'ms');
+    console.log(
+      '[SolverBridge] iterations:',
+      solveResult.iterations,
+      'exploitability:',
+      solveResult.exploitability,
+      'time:',
+      solveResult.elapsedMs.toFixed(0) + 'ms',
+      'stoppedBy:',
+      solveResult.stoppedBy,
+    );
 
     // Get strategy at the given history position
-    const strategyResult = await proxy.getStrategy(history);
+    const strategyResult = await proxy.getStrategy(historyResolution.history);
     if (!strategyResult) {
       console.warn('[SolverBridge] getStrategy returned null (terminal/chance node)');
       return null;
@@ -142,8 +225,14 @@ export async function solve(
       numHands: strategyResult.numHands,
       currentPlayer: strategyResult.currentPlayer as 'oop' | 'ip',
       privateCards,
+      history: historyResolution.history,
+      historyMapping: historyResolution.mappedSteps,
       iterations: solveResult.iterations,
       exploitability: solveResult.exploitability,
+      targetExploitability,
+      exploitabilityPctOfCurrentPot: (solveResult.exploitability * 100) / currentTotalPot,
+      elapsedMs: solveResult.elapsedMs,
+      stoppedBy: solveResult.stoppedBy,
     };
   } catch (e) {
     console.warn('[SolverBridge] Solve error:', e);

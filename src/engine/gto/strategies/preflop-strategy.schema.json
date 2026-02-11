@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://holdem.local/preflop-strategy.schema.json",
+  "title": "Preflop Strategy File",
+  "type": "object",
+  "required": ["version", "source", "assumptions", "spots"],
+  "properties": {
+    "version": { "type": "string" },
+    "source": {
+      "type": "object",
+      "required": ["pdf", "extractedAt", "method", "stackDepthBb"],
+      "properties": {
+        "pdf": { "type": "string" },
+        "extractedAt": { "type": "string" },
+        "method": { "type": "string" },
+        "stackDepthBb": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "assumptions": {
+      "type": "object",
+      "required": [
+        "handGranularity",
+        "unknownColorAction",
+        "blueIsRaise",
+        "greenIsCall",
+        "darkGrayIsFold",
+        "whiteIsFold"
+      ],
+      "properties": {
+        "handGranularity": { "const": "169" },
+        "unknownColorAction": { "const": "FOLD" },
+        "blueIsRaise": { "type": "boolean" },
+        "greenIsCall": { "type": "boolean" },
+        "darkGrayIsFold": { "type": "boolean" },
+        "whiteIsFold": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "spots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "scenario", "heroPosition", "hands"],
+        "properties": {
+          "id": { "type": "string" },
+          "scenario": {
+            "enum": ["RFI", "FACING_RFI", "RFI_VS_3BET", "SB_LIMP_VS_BB_RAISE"]
+          },
+          "heroPosition": {
+            "enum": ["BTN", "SB", "BB", "UTG", "UTG1", "UTG2", "MP", "MP1", "CO"]
+          },
+          "openerPositions": {
+            "type": "array",
+            "items": { "enum": ["BTN", "SB", "BB", "UTG", "UTG1", "UTG2", "MP", "MP1", "CO"] }
+          },
+          "threeBettorPositions": {
+            "type": "array",
+            "items": { "enum": ["BTN", "SB", "BB", "UTG", "UTG1", "UTG2", "MP", "MP1", "CO"] }
+          },
+          "notes": { "type": "string" },
+          "hands": {
+            "type": "object",
+            "patternProperties": {
+              "^[AKQJT98765432]{2}(s|o)?$": {
+                "type": "object",
+                "required": ["fold", "call", "raise", "allIn"],
+                "properties": {
+                  "fold": { "type": "number", "minimum": 0, "maximum": 1 },
+                  "call": { "type": "number", "minimum": 0, "maximum": 1 },
+                  "raise": { "type": "number", "minimum": 0, "maximum": 1 },
+                  "allIn": { "type": "number", "minimum": 0, "maximum": 1 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

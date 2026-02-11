@@ -6,4 +6,6 @@ export { analyzeBoardTexture } from './board-texture';
 export { calculateBetSize } from './bet-sizing';
 export { holeCardsToHandKey } from './preflop-ranges';
 export { terminateSolver } from './solver/solver-bridge';
+export { getPreflopStrategyMeta, lookupPreflopRangeAction } from './strategy-loader';
 export * from './types';
+export * from './strategy-types';

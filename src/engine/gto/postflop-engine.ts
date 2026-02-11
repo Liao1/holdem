@@ -20,6 +20,28 @@ function cardStr(c: { rank: number; suit: string }): string {
   return (RANK_CHARS[c.rank] || '?') + (SUIT_CHARS[c.suit] || '?');
 }
 
+function currentPlayerAfterHistoryLength(len: number): 'oop' | 'ip' {
+  return len % 2 === 0 ? 'oop' : 'ip';
+}
+
+/**
+ * In multiway spots we collapse to a 2-player abstraction.
+ * If the mapped history ends on the wrong side, trim oldest actions
+ * until the solver turn matches the bot side.
+ */
+function alignHistoryForExpectedPlayer(
+  historyActions: SolverAction[],
+  expectedPlayer: 'oop' | 'ip',
+): { aligned: SolverAction[]; dropped: number } {
+  const aligned = historyActions.slice();
+  let dropped = 0;
+  while (aligned.length > 0 && currentPlayerAfterHistoryLength(aligned.length) !== expectedPlayer) {
+    aligned.shift();
+    dropped++;
+  }
+  return { aligned, dropped };
+}
+
 /**
  * Make a postflop decision using the WASM CFR solver.
  * Supports both heads-up and multiway pots (multiway approximated by
@@ -60,6 +82,7 @@ async function trySolverAction(
     if (opponentIds.length === 0) return null;
 
     const ip = isInPosition(player, gameState);
+    const expectedPlayer: 'oop' | 'ip' = ip ? 'ip' : 'oop';
 
     const holeStr = player.holeCards.map(c => cardStr(c)).join('');
     const boardStr = gameState.communityCards.map(c => cardStr(c)).join(' ');
@@ -73,15 +96,24 @@ async function trySolverAction(
       return s;
     }).join(', '));
 
+    const streetHistory = buildStreetHistoryContext(gameState);
+    const currentTotalPot = getTotalPot(gameState);
+    const startingPot = Math.max(currentTotalPot - streetHistory.streetContribution, BIG_BLIND);
+
+    let historyActionsForSolver = streetHistory.historyActions;
+    if (opponentIds.length > 1) {
+      const { aligned, dropped } = alignHistoryForExpectedPlayer(historyActionsForSolver, expectedPlayer);
+      historyActionsForSolver = aligned;
+      if (dropped > 0) {
+        console.log('[PostflopEngine] multiway history aligned: dropped', dropped, 'oldest actions');
+      }
+    }
+
     // Build ranges (multiway: opponents merged into virtual opponent)
     const { oopRange, ipRange } = buildRanges(gameState, player.id, opponentIds, ip);
 
     // Convert board to solver IDs
     const board = boardToSolverIds(gameState.communityCards);
-
-    const currentTotalPot = getTotalPot(gameState);
-    const streetHistory = buildStreetHistoryContext(gameState);
-    const startingPot = Math.max(currentTotalPot - streetHistory.streetContribution, BIG_BLIND);
 
     // effective_stack is measured from the start of the current street
     const maxOpponentChips = Math.max(
@@ -105,13 +137,16 @@ async function trySolverAction(
 
     console.log('[PostflopEngine] currentPot:', currentTotalPot, 'streetStartPot:', startingPot);
     console.log('[PostflopEngine] street history:', streetHistory.historyActions.map(a => `${a.type}:${a.amount}`).join(' / ') || '(none)');
+    if (historyActionsForSolver !== streetHistory.historyActions) {
+      console.log('[PostflopEngine] solver history:', historyActionsForSolver.map(a => `${a.type}:${a.amount}`).join(' / ') || '(root)');
+    }
     console.log('[PostflopEngine] effectiveStack:', effectiveStack, 'SPR:', (effectiveStack / startingPot).toFixed(1));
 
     const timeBudgetMs = numBoardCards === 3 ? 30000 : 10000;
 
     // Solve
     const result = await solve(oopRange, ipRange, board, startingPot, effectiveStack, {
-      historyActions: streetHistory.historyActions,
+      historyActions: historyActionsForSolver,
       currentTotalPot,
       targetExploitabilityPctOfCurrentPot: 0.5,
       timeBudgetMs,
@@ -122,18 +157,15 @@ async function trySolverAction(
       return null;
     }
 
-    const expectedPlayer = ip ? 'ip' : 'oop';
-    const enforcePlayerMatch = opponentIds.length === 1;
     if (result.currentPlayer !== expectedPlayer) {
       console.warn('[PostflopEngine] Solver player mismatch:', {
         expectedPlayer,
         solverPlayer: result.currentPlayer,
         resolvedHistory: result.history,
-        enforcePlayerMatch,
+        opponents: opponentIds.length,
+        inputHistory: historyActionsForSolver.map(a => `${a.type}:${a.amount}`),
       });
-      if (enforcePlayerMatch) {
-        return null;
-      }
+      return null;
     }
 
     console.log('[PostflopEngine] === Solver Output ===');
@@ -159,7 +191,10 @@ async function trySolverAction(
     const packed = result.privateCards[handIdx];
     const matchedC1 = solverIdToCard(packed & 0xff);
     const matchedC2 = solverIdToCard((packed >> 8) & 0xff);
-    console.log('[PostflopEngine] hand matched at index', handIdx, '→', cardStr(matchedC1) + cardStr(matchedC2));
+    const matchedLabel = cardStr(matchedC1) + cardStr(matchedC2);
+    const matchedCanonical = [cardStr(matchedC1), cardStr(matchedC2)].sort().join('');
+    const holeCanonical = player.holeCards.map(cardStr).sort().join('');
+    console.log('[PostflopEngine] hand matched at index', handIdx, '→', matchedLabel, `(canon=${matchedCanonical}, expected=${holeCanonical})`);
 
     // Read the strategy for this hand
     const numActions = result.actions.length;
